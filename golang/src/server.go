@@ -2,9 +2,9 @@ package main
 
 import (
     "os"
+    "time"
     "bytes"
     "image"
-    "image/color"
     "strconv"
     "net/http"
     "io/ioutil"
@@ -38,97 +38,92 @@ func main() {
     port = os.Args[1]
   }
 
-  http.HandleFunc("/image", httpImage)
-  http.HandleFunc("/local", localImage)
-  http.HandleFunc("/random", random)
-  http.HandleFunc("/gen", gen)
+  println(time.Now().Format("15:04:05 Mon January _2 2006") + ". Server up and running on port " + port)
+
+  http.HandleFunc("/bitmap", httpImage)
   http.ListenAndServe(":" + port, nil)
 }
 
-func localImage(w http.ResponseWriter, r *http.Request) {
+func httpImage(w http.ResponseWriter, r *http.Request) {
   var (
-    filename string
-    format string
+    url string
+    source string
     bits int
+    err error
+    img image.Image
+  )
+
+  // Read the source GET parameter (local, http, imgur)
+  if source = r.URL.Query().Get("source"); source == "" {
+    println("GET parameter source malformed")
+    panic("failed")
+  }
+
+  // Read the url GET parameter (used in local, http sources)
+  if url = r.URL.Query().Get("url"); url == "" && source != "imgur" {
+    println("GET parameter url malformed")
+    panic("failed")
+  }
+
+  // Get the requested bitrate, defaults to 16
+  if bits, err = strconv.Atoi(r.URL.Query().Get("bits")); !(bits == 16 || bits == 18) || err != nil {
+    bits = 16
+  }
+
+  // Get image
+  if source == "local" {
+    img = getLocalImage(url)
+  } else if source == "http" {
+    img = getImageFromURL(url)
+  } else if source == "imgur" {
+    img = getImageFromImgur()
+  } else {
+    println("source '" + source + "' not supported")
+    panic("failed")
+  }
+
+  // Process image (crop)
+  if img.Bounds().Dx() > 240 || img.Bounds().Dy() > 320 {
+    img = imaging.Fill(img, 240, 320, imaging.Center, imaging.Lanczos)
+  }
+
+  // Log request to console
+  log := time.Now().Format("15:04:05") + ": Requested " + source
+  if source != "imgur" {
+    log += ": " + url
+  }
+  println(log + ", bits: " + strconv.Itoa(bits))
+
+  // Serve image
+  serveImage(w, img, bits)
+}
+
+
+
+func getLocalImage(filename string) image.Image {
+  var (
     img image.Image
     dat []byte
     err error
   )
 
-  // Read the img GET parameter
-  if filename = r.URL.Query().Get("img"); filename == "" {
-    print("GET parameter img malformed")
-    panic("failed")
-  }
-
-  // Get the image type requested (BMP, RAW)
-  if format = r.URL.Query().Get("format"); format == "" {
-    // default: bmp
-    format = "bmp"
-  }
-
-
+  // Read file from disk
   if dat, err = ioutil.ReadFile(filename); err != nil {
-    print("Can't open file" + filename)
-    panic("failed")
-  }
-
-
-  // Create Image object
-  if img, _, err = image.Decode(bytes.NewBuffer(dat)); err != nil {
-    print("unable to decode image")
+    println("Can't open file" + filename)
     panic(err)
   }
 
-  // Get the image type requested (BMP, RAW)
-  if bits, err = strconv.Atoi(r.URL.Query().Get("bits")); bits == 0 && err != nil {
-    // default: 18
-    bits = 18
+  // Create Image object
+  if img, _, err = image.Decode(bytes.NewBuffer(dat)); err != nil {
+    println("unable to decode image")
+    panic(err)
   }
 
-  img = processImage(img, format == "bmp")
-  serveImage(w, img, format == "bmp", bits)
+  return img
 }
 
-func httpImage(w http.ResponseWriter, r *http.Request) {
-  var (
-    img string
-    format string
-    bits int
-    err error
-  )
 
-  // Read the img GET parameter
-  if img = r.URL.Query().Get("img"); img == "" {
-    print("GET parameter img malformed")
-    panic("failed")
-  }
-
-  // Get the image type requested (BMP, RAW)
-  if format = r.URL.Query().Get("format"); format == "" {
-    // default: bmp
-    format = "bmp"
-  }
-
-  // Get the image type requested (BMP, RAW)
-  if bits, err = strconv.Atoi(r.URL.Query().Get("bits")); bits == 0 && err != nil {
-    // default: 18
-    bits = 18
-  }
-
-  image := getImageFromURL(w, img)
-  image = processImage(image, format == "bmp")
-  serveImage(w, image, format == "bmp", bits)
-}
-
-func random(w http.ResponseWriter, r *http.Request) {
-  print("serving random image")
-
-  var (
-    format string
-    bits int
-    err error
-  )
+func getImageFromImgur() image.Image {
 
   //if the index overflows or isn't set yet
   if count >= len(imgur.Data) || count == -1 {
@@ -144,7 +139,7 @@ func random(w http.ResponseWriter, r *http.Request) {
 
     // Create imgur.com api request
     if req, err = http.NewRequest("GET", "https://api.imgur.com/3/gallery/r/subaru", nil); err != nil {
-      print("can't create request")
+      println("can't create request")
       panic(err)
     }
 
@@ -153,19 +148,19 @@ func random(w http.ResponseWriter, r *http.Request) {
 
     // Execute request and get response
     if resp, err = client.Do(req); err != nil {
-      print("request failed")
+      println("request failed")
       panic(err)
     }
 
     // Read content from response
     if content, err = ioutil.ReadAll(resp.Body); err != nil {
-      print("reading response failed")
+      println("reading response failed")
       panic(err)
     }
 
     // Unmarshal JSON to Struct
     if err = json.Unmarshal(content, &imgur); err != nil {
-      print("json unmarshal failed")
+      println("json unmarshal failed")
       panic(err)
     }
   }
@@ -174,52 +169,11 @@ func random(w http.ResponseWriter, r *http.Request) {
   data := imgur.Data[count]
   count = count + 1
 
-
-  // Get the image type requested (BMP, RAW)
-  if format = r.URL.Query().Get("format"); format == "" {
-    // default: bmp
-    format = "bmp"
-  }
-
-  // Get the image type requested (BMP, RAW)
-  if bits, err = strconv.Atoi(r.URL.Query().Get("bits")); bits == 0 && err != nil {
-    // default: 18
-    bits = 18
-  }
-
-  image := getImageFromURL(w, data.Link)
-  image = processImage(image, format == "bmp")
-  serveImage(w, image, format == "bmp", bits)
-}
-
-func gen(w http.ResponseWriter, r *http.Request) {
-  format := "raw"
-
-
-  img := image.NewRGBA(image.Rect(0, 0, 240, 320))
-  bounds := img.Bounds()
-
-
-  for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-    for x := bounds.Min.X; x < bounds.Max.X; x++ {
-      g := uint8((x * 254) / 240)
-      img.Set(x, y, color.RGBA{g, 0x00, 0x00, 0xff})
-    }
-  }
-
-  bits := 18
-
-
-
-
-  serveImage(w, img, format == "bmp", bits)
+  return getImageFromURL(data.Link)
 }
 
 
-
-
-
-func getImageFromURL(w http.ResponseWriter, img string) image.Image {
+func getImageFromURL(img string) image.Image {
   var (
     err error
     content []byte
@@ -229,20 +183,20 @@ func getImageFromURL(w http.ResponseWriter, img string) image.Image {
 
   // Request Image
   if resp, err = http.Get(img); err != nil {
-    print("requesting image failed")
+    println("requesting image failed")
     panic(err)
   }
 
   // Read content to byte[]
   defer resp.Body.Close()
   if content, err = ioutil.ReadAll(resp.Body); err != nil {
-    print("unable to read content from request")
+    println("unable to read content from request")
     panic(err)
   }
 
   // Create Image object
   if input, _, err = image.Decode(bytes.NewBuffer(content)); err != nil {
-    print("unable to decode image")
+    println("unable to decode image")
     panic(err)
   }
 
@@ -250,84 +204,45 @@ func getImageFromURL(w http.ResponseWriter, img string) image.Image {
 }
 
 
-
-func processImage(input image.Image, flipImage bool) image.Image {
-  dst := input
-
-  // Resize if needed
-  if dst.Bounds().Dx() > 240 || dst.Bounds().Dy() > 320 {
-    dst = imaging.Fill(dst, 240, 320, imaging.Center, imaging.Lanczos)
-  }
-
-  if flipImage {
-    //dst = imaging.FlipH(dst)
-    dst = imaging.FlipV(dst)
-  }
-
-  return dst
-}
-
-
-
-func serveImage(w http.ResponseWriter, img image.Image, asBmp bool, bits int) {
+func serveImage(w http.ResponseWriter, img image.Image, bits int) {
   // Create buffer from image
   buffer := new(bytes.Buffer)
-  var mimeType string
+  bounds := img.Bounds()
 
-  if asBmp {
-    mimeType = "image/bmp"
-    if err := imaging.Encode(buffer, img, imaging.BMP); err != nil {
-      print("unable to encode image")
-      panic(err)
-    }
-  } else {
-    var mb uint16
-    bounds := img.Bounds()
-    //mimeType = "application/octet-stream"
-    mimeType = "text/plain"
+  // two first bytes are for the width
+  binary.Write(buffer, binary.BigEndian, uint16(bounds.Max.X))
 
-    // two first bytes are for the width
-    binary.Write(buffer, binary.BigEndian, uint16(bounds.Max.X))
+  // next two bytes for the height
+  binary.Write(buffer, binary.BigEndian, uint16(bounds.Max.Y))
 
-    // next two bytes for the height
-    binary.Write(buffer, binary.BigEndian, uint16(bounds.Max.Y))
+  // color bits (18bit 262k, 16bit 65k)
+  binary.Write(buffer, binary.BigEndian, uint16(bits))
 
-    // color bits (18bit 262k, 16bit 65k, 8bit 180)
-    binary.Write(buffer, binary.BigEndian, uint16(bits))
+  // loop through each pixel and convert them to rgb565 or rgb666
+  for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+    for x := bounds.Min.X; x < bounds.Max.X; x++ {
+      r, g, b, _ := img.At(x, y).RGBA()
 
-
-    for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-      for x := bounds.Min.X; x < bounds.Max.X; x++ {
-        r, g, b, _ := img.At(x, y).RGBA()
-
-        if bits == 16 {
-          mb = (uint16(r) & 0xF800) | ((uint16(g) & 0xFC00) >> 5) | (uint16(b) >> 11)
-          binary.Write(buffer, binary.BigEndian, mb)
-        } else if bits == 18 {
-          binary.Write(buffer, binary.BigEndian, uint8(r))
-          binary.Write(buffer, binary.BigEndian, uint8(g))
-          binary.Write(buffer, binary.BigEndian, uint8(b))
-        } else {
-          print("bitrate not supported yet: " + strconv.FormatInt(int64(bits), 16))
-          panic("here")
-        }
-
+      if bits == 16 {
+        binary.Write(buffer, binary.BigEndian, (uint16(r) & 0xF800) | ((uint16(g) & 0xFC00) >> 5) | (uint16(b) >> 11))
+      } else if bits == 18 {
+        binary.Write(buffer, binary.BigEndian, uint8(r))
+        binary.Write(buffer, binary.BigEndian, uint8(g))
+        binary.Write(buffer, binary.BigEndian, uint8(b))
       }
-    }
 
-    plain := base64.StdEncoding.EncodeToString(buffer.Bytes())
-    buffer = bytes.NewBuffer([]byte(plain))
+    }
   }
 
+  // Encode the whole buffers content to base64
+  buffer = bytes.NewBuffer([]byte(base64.StdEncoding.EncodeToString(buffer.Bytes())))
 
-
-  // Serve data
-  w.Header().Set("Content-Type", mimeType)
+  // Write response headers and data
+  w.Header().Set("Content-Type", "text/plain")
   w.Header().Set("Content-Length", strconv.Itoa(len(buffer.Bytes())))
 
-
   if _, err := w.Write(buffer.Bytes()); err != nil {
-    print("unable to write image")
+    println("unable to write image")
     panic(err)
   }
 }

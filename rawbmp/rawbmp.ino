@@ -1,103 +1,108 @@
+#include <ESP8266WiFi.h>
+#include <SPI.h>
+#include <math.h>
 
-
-/***************************************************
-  This is an example sketch for the Adafruit 2.2" SPI display.
-  This library works with the Adafruit 2.2" TFT Breakout w/SD card
-  ----> http://www.adafruit.com/products/1480
-
-  Check out the links above for our tutorials and wiring diagrams
-  These displays use SPI to communicate, 4 or 5 pins are required to
-  interface (RST is optional)
-  Adafruit invests time and resources providing this open source code,
-  please support Adafruit and open-source hardware by purchasing
-  products from Adafruit!
-
-  Written by Limor Fried/Ladyada for Adafruit Industries.
-  MIT license, all text above must be included in any redistribution
- ****************************************************/
-
-#include "SPI.h"
 #include "Adafruit_GFX.h"
 #include "Adafruit_ILI9340.h"
-#include <ESP8266WiFi.h>
-#include <ArduinoJson.h>
-#include <math.h>
+#include "ArduinoJson.h"
 #include "Base_64.h"
-#include "ds8.h"
+
 #include "wificonf.h"
 
-Adafruit_ILI9340 tft = Adafruit_ILI9340(15, 2, 4);
+#define GO_host     "192.168.0.19"
+#define GO_port     8088
+#define ILI9340_CS  15
+#define ILI9340_DC  2
+#define ILI9340_RST 4
 
+WiFiClient client;
+Adafruit_ILI9340 tft = Adafruit_ILI9340(ILI9340_CS, ILI9340_DC, ILI9340_RST);
 
+// init LCD and connect to wifi
 void setup() {
-
-  Serial.begin(9600);
-  while (!Serial);
-
   tft.begin();
-}
 
-
-void wifiConnect(int timeout) {
-  tft.setTextColor(ILI9340_WHITE);
+  // Set the orientation to portrait
+  tft.setRotation(2);
+  tft.setCursor(0, 0);
   
-  tft.print("wifi init ");
+  tft.fillScreen(ILI9340_BLACK);
+  tft.setTextColor(ILI9340_WHITE);
+
+  tft.print("Wi-Fi init ");
   tft.print(SSID_NAME);
   WiFi.begin(SSID_NAME, SSID_PASS);
 
-  unsigned long tout = millis() + timeout;
+  // Try to connect, and time out after a minute
+  unsigned long tout = millis() + 60 * 1000;
   unsigned long ldot = tout;
   while(WiFi.status() != WL_CONNECTED && tout > millis()) {
     if(millis() - ldot > 500) {
       tft.print(".");
       ldot = millis();
     }
-
     yield();
   }
 
+  // Connected to wifi?
   if(WiFi.status() != WL_CONNECTED) {
     tft.setTextColor(ILI9340_RED);
-    tft.println(" BAD!");
+    tft.println("\nConnection failed!");
     return;
   }
   else {
-    tft.setTextColor(ILI9340_GREEN);
-    tft.println(" OK!");
-
     tft.setTextColor(ILI9340_WHITE);
-    tft.print("  ip: ");
+    tft.print("\nDHCP assigned ip: ");
     tft.println(WiFi.localIP());
+  }
 
-    tft.print("  signal: ");
-    tft.print(WiFi.RSSI());
-    tft.println("dBm");
+  // Connect to server
+  if (!client.connect(GO_host, GO_port)) {
+    tft.setTextColor(ILI9340_RED);
+    tft.println("Cannot connect to server");
+    return;
+  }
+  else {
+    tft.println("Connected to server");
   }
 }
 
 
+void loop(void) {
 
-uint16_t read16(WiFiClient & f) {
-  uint8_t d[2];
-  f.readBytes(d, 2);
-  return (d[1] << 8) | d[0];
+  //request("/bitmap?source=imgur");
+  request("/bitmap?source=http&url=https://pixabay.com/static/uploads/photo/2013/07/12/12/58/tv-test-pattern-146649_960_720.png");
+  
+  drawBMP(0, 0);
+
+  delay(2000);
+  tft.setCursor(0, 0);
+  tft.fillScreen(ILI9340_WHITE);
 }
 
-uint32_t read32(WiFiClient & f) {
-  uint8_t d[4];
-  f.readBytes(d, 4);
-  return (d[3] << 24) | (d[2] << 16) | (d[1] << 8) | d[0];
+
+void request(char* url) {
+  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
+               "Host: " + GO_host + "\r\n" +
+               "Connection: close\r\n\r\n");
+
+  while (!client.available()) {
+    // todo: timeout
+    yield();
+  }
+
+  // ignore headers (assume 200)
+  while (client.available() && client.readStringUntil('\r') != "\n");
 }
 
 
-
-void read_b64(WiFiClient &f, uint8_t *output, uint16_t outputLen) {
+void read_b64(uint8_t *output, uint16_t outputLen) {
   uint16_t bufSize = (outputLen/3)*4;
+  uint16_t idx = 0;
   uint8_t buf[bufSize];
   
-  size_t idx = 0;
   while(idx < bufSize) {
-    idx += f.read(&buf[idx], bufSize-idx);
+    idx += client.read(&buf[idx], bufSize-idx);
     yield();
   }
 
@@ -105,17 +110,17 @@ void read_b64(WiFiClient &f, uint8_t *output, uint16_t outputLen) {
 }
 
 
-void rawDraw(WiFiClient &bmpFile, uint16_t x, uint16_t y) {
+void drawBMP(uint16_t x, uint16_t y) {
   uint8_t int16[6];
-  uint16_t buffSize = 240;
+  uint16_t buffSize = 60;
   uint16_t w, h, bits;
 
   // dunno whats wrong with the first byte
-  bmpFile.readBytes(int16, 1);
+  client.readBytes(int16, 1);
 
   // first two bytes are for the width
   // next two bytes are for the height
-  read_b64(bmpFile, int16, 6);
+  read_b64(int16, 6);
   w = (int16[0] << 8) | int16[1];
   h = (int16[2] << 8) | int16[3];
   bits = (int16[4] << 8) | int16[5];
@@ -123,7 +128,6 @@ void rawDraw(WiFiClient &bmpFile, uint16_t x, uint16_t y) {
   uint16_t dataLeft = (w * h * ceil(bits/2));
   uint16_t blockSz = dataLeft < buffSize ? dataLeft : buffSize;
   uint8_t block[blockSz];
-
 
   // set pixel format
   if(bits == 16) {
@@ -141,126 +145,16 @@ void rawDraw(WiFiClient &bmpFile, uint16_t x, uint16_t y) {
   while(dataLeft > 0) {
     
     // maximum block size left
-    //if(dataLeft < 240) blockSz = dataLeft;
+    //if(blockSz > dataLeft) blockSz = dataLeft;
     
     // read block
-    read_b64(bmpFile, block, blockSz);
+    read_b64(block, blockSz);
 
     // push to screen
     tft.pushData(block, blockSz);
 
     // adjust data left
     dataLeft -= blockSz;
-  }
-
-  
-  tft.setCursor(0, 0);
-  tft.println();
-  tft.print("done");
-}
-
-
-
-
-void getImage(char* host, int16_t port, char* url) {
-  tft.setTextColor(ILI9340_WHITE);
-  tft.print("con ");
-  tft.print(host);
-  tft.print(":");
-  tft.print(port);
-
-  WiFiClient client;
-  if (!client.connect(host, port)) {
-    tft.setTextColor(ILI9340_RED);
-    tft.println(" BAD!");
-    return;
-  }
-  else {
-    tft.setTextColor(ILI9340_GREEN);
-    tft.println(" OK!");
-  }
-
-  String req = String("GET ") + url + " HTTP/1.1\r\n" +
-               "Host: " + host + "\r\n" +
-               "Connection: close\r\n\r\n";
-               
-  tft.setTextColor(ILI9340_WHITE);
-  tft.println("req");
-  tft.println(req);
-
-
-
-
-  client.print(req);
-  
-
-  unsigned long time = millis();
-  while (!client.available()) {
-    //todo: timeout
-    yield();
-  }
-  yield();
-
-
-
-  tft.println("res");
-
-  bool headers = true;
-  bool bmp = false, raw = false;
-
-  while (client.available() && headers) {
-
-    String line = client.readStringUntil('\r');
-
-    tft.println(String("  ") + line);
-    
-    if(line.indexOf("HTTP") && line.indexOf("200")) {
-      
-    }
-
-    if(line.indexOf("Content-Type") > 0) {
-      raw = line.indexOf("application/octet-stream") > 0;
-    }
-
-    if (line == "\n") headers = false;
-  }
-
-
-  rawDraw(client, 0, 0);
-
-
-  tft.setCursor(0, 0);
-}
-
-
-
-
-void loop(void) {
-
-  tft.setRotation(2);
-  tft.fillScreen(ILI9340_BLACK);
-
-  tft.setFont(&Nintendo_DS_BIOS8pt7b);
-  tft.setCursor(0, 0);
-  tft.println();
-
-
-  //introduce();
-  wifiConnect(60 * 5 * 1000);
-
-  while(1) {
-
-    
-    getImage("192.168.0.19", 8088, "/random?format=raw&bits=16");
-    //getImage("192.168.0.22", 8088, "/local?img=subpixelroll.png&format=raw");
-
-    unsigned long time = millis();
-
-    while(time + 1000*10 > millis()) {
-      delay(2000);
-      yield();
-      wdt_disable();
-    }
   }
 }
 
