@@ -1,1 +1,0 @@
-## RAWBMP - Arduino project
